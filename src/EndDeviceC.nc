@@ -11,8 +11,25 @@ module EndDeviceC {
 		interface Boot;
 		interface Timer<TMilli>;
 		interface Leds;
+		
+	    // Interfaces for initialization:
+		interface SplitControl as RadioControl;
+    	interface SplitControl as SerialControl;
+    	interface StdControl as RoutingControl;
+    
+	    // Interfaces for communication, multihop and serial:
+		interface Send;
+		interface Receive;
+		interface AMSend as SerialSend;
+		interface CollectionPacket;
+		interface RootControl;
+		
+        interface Queue<message_t *> as UARTQueue;
+    	interface Pool<message_t> as UARTMessagePool;
+    
+    
 
-		// Sth11 readers
+		// Sensors readers intrfaces
 		interface Read<uint16_t> as Temperature;
 		interface Read<uint16_t> as Humidity;		
 		interface Read<uint16_t> as X_Axis;
@@ -21,64 +38,83 @@ module EndDeviceC {
 		interface Read<uint8_t> as VisibleLight;
 		interface Read<uint8_t> as InfraredLight;
 
-		// radio communication
-		interface Packet;
-		interface AMPacket;
-		interface AMSend;
-		interface SplitControl as AMControl;
-		interface Receive;
 	}
 }
 
 implementation {
-
-	uint16_t AccelX_data,AccelY_data,Temp_data,Hum_data,VisLight_data, InfraLight_data;
+	////////////////////////////////////////Sensors variables/////////////////////////////////////////////////////////
+	uint16_t AccelX_data,AccelY_data,Temp_data,Hum_data,VisLight_data, InfraLight_data, temperatureValue,humidityValue;
 	int16_t Intersema_data[2];
-	
-	uint16_t temperatureValue;
-	uint16_t humidityValue;
-	
+	/////////////////////////////////////////////Radio Values/////////////////////////////////////////////////////////
 	bool radioBusy = FALSE;
 	message_t pkt;
-	error_t sendError;
-	void report_problem() { call Leds.led0Toggle(); }
-	void report_sent() { call Leds.led1Toggle(); }
-	void report_received() { call Leds.led2Toggle(); }
-  
-	void sent() 
-	{ 
-				// creating the packet 
-			if(radioBusy == FALSE) {
-				motemsg_t * msg = call Packet.getPayload(&pkt, sizeof(motemsg_t));
-				msg->	nodeId 		= TOS_NODE_ID;
-				msg->	tempVal 	= temperatureValue;
-				msg->	humVal 		= humidityValue;
-				msg->	AccelX_data = AccelX_data;
-				msg-> 	AccelY_data = AccelY_data;
-				msg-> 	Intersema_data[0] = Intersema_data[0];
-				msg-> 	Intersema_data[1] = Intersema_data[1];
-				msg->	VisLight_data	= VisLight_data;
-				msg->	InfLight_data 	= InfraLight_data;
-				 
+	//////////////////////////////////////////////Funcitons Templates/////////////////////////////////////////////////
+	task void uartSendTask();
+	/////////////////////////////////////////////Messages Functions///////////////////////////////////////////////////
+	
+	void fill_sensor_message(motemsg_t * msg){
+		msg->	nodeId 		= TOS_NODE_ID;
+		msg->	tempVal 	= temperatureValue;
+		msg->	humVal 		= humidityValue;
+		msg->	AccelX_data = AccelX_data;
+		msg-> 	AccelY_data = AccelY_data;
+		msg-> 	Intersema_data[0] = Intersema_data[0];
+		msg-> 	Intersema_data[1] = Intersema_data[1];
+		msg->	VisLight_data	= VisLight_data;
+		msg->	InfLight_data 	= InfraLight_data;		
+	}
+	
+	void start_sending_data(){
+		printf("Start reading sensor\n");
+		call Timer.startPeriodic(TIMER_PERIOD_MILLI);
+	}
+	////////////////////////////////////////////Led Functions/////////////////////////////////////////////////////////
+	void report_problem() 	{ call Leds.led0Toggle(); }
+	void report_send() 		{ call Leds.led1Toggle(); }
+	void report_received() 	{ call Leds.led2Toggle(); }
+	message_t sendbuf;
+  	message_t uartbuf;
+  	bool uartbusy=FALSE;
+	
+  /////////////////////////////////////Starting Events////////////////////
+  	event void Boot.booted() {
+	printf("Booted\n");
+    if (call RadioControl.start() != SUCCESS)
+      report_problem();
+	}
 
-				// sending packet
-				sendError = call AMSend.send(AM_BROADCAST_ADDR, &pkt, sizeof(motemsg_t));
-				if(sendError == SUCCESS) {
-					call Leds.led2Toggle();
+	 event void RadioControl.startDone(error_t err) {
+	    if (err != SUCCESS)
+	      call RadioControl.start();
+	    else {
+	    	call RoutingControl.start();
+	      	if (TOS_NODE_ID == 1){ 
+	      		printf("I'm rooter\n\r");
+				call RootControl.setRoot();
+				 if (call SerialControl.start() != SUCCESS)
+      				report_problem();
+			}else
+				start_sending_data();
+	    }
+  	}
+	////////////////////////////////////////////////////////////////////////////
+	void send() 
+	{ 
+		printf("Trying to send radioBusy:  %d \n\r ", radioBusy);
+			if(radioBusy == FALSE) {
+				motemsg_t * msg = call Send.getPayload(&pkt, sizeof(motemsg_t));
+				printf("sending\n\r");
+				fill_sensor_message(msg);				// sending packet
+				if(call Send.send(&pkt, sizeof(motemsg_t)) == SUCCESS) {
+					report_send();
 					radioBusy = TRUE;
 				} else {
-					printf("Error sending msg, code: %d", sendError);
-					call Leds.led0Toggle();					
+					printf("Error while sending message\n\r");
+					call Leds.led0Toggle(); call Leds.led2Toggle();	
 				}
-				sendError = 0;
 			}
-
 	}
-		
-	event void Boot.booted() {
-		call AMControl.start();
-	}
-
+////////////////////Timer Fireds///////////////////////////////////////////
 	event void Timer.fired() {
 		if(call Temperature.read() != SUCCESS) {
 			report_problem();
@@ -101,84 +137,161 @@ implementation {
 		if(call InfraredLight.read() != SUCCESS) {
 			report_problem();
 		}
-		sent();
-		
-	}
-	
-
-	
-	event void Temperature.readDone(error_t result, uint16_t val) {
-		if(result == SUCCESS) 
-		{
+		send();
+	}	
+//////////////////sensors reading events///////////////////////////////////
+		event void Temperature.readDone(error_t result, uint16_t val) {
+		if(result == SUCCESS)		{
 			temperatureValue =  val;
 		}
-		else 
-		{
-			printf("Error reading light sensor.\r\n");
-			call Leds.led0Toggle();
+		else {
+			report_problem();
 		}
 	}
 	
 	event void Humidity.readDone(error_t result, uint16_t val){
-		if(result == SUCCESS) 
-		{
-			humidityValue = 2.5 * (val / 4096.0) * 6250;
+		if(result == SUCCESS){
+			humidityValue = val;
 		}
-		else 
-		{
-			printf("Error reading light sensor.\r\n");
-			call Leds.led0Toggle();
+		else{
+			report_problem();
 		}
 	}
-
-	event void AMSend.sendDone(message_t * msg, error_t error) {
-		if(msg == &pkt) {
-			radioBusy = FALSE;
-		}
-	}
-
-	event void AMControl.startDone(error_t err) {
-		if(err == SUCCESS) {
-			call Timer.startPeriodic(TIMER_PERIOD_MILLI);
+	event void Intersema.readDone(error_t result, int16_t *data){
+		if(result == SUCCESS){
+			Intersema_data[0]=data[0];
+			Intersema_data[1]=data[1];
 		}
 		else {
-			call AMControl.start();
+			report_problem();
 		}
 	}
-
-	event void AMControl.stopDone(error_t error){
-		
-	}
-
-	event message_t * Receive.receive(message_t *msg, void *payload, uint8_t len){
-		if(len == sizeof(motemsg_t)) { 
-			motemsg_t* incomingPacket = (motemsg_t *) payload;
-			call Leds.led1Toggle();
-		}
-		return msg;
-	}
-
-
-
-	event void Intersema.readDone(error_t error, int16_t *data){
-		Intersema_data[0]=data[0];
-		Intersema_data[1]=data[1];
-	}
-
 
 	event void X_Axis.readDone(error_t result, uint16_t val){
-		AccelX_data = val;
+		if(result == SUCCESS){
+			AccelX_data = val;
+		}
+		else{
+			report_problem();
+		}
 	}
 
 	event void Y_Axis.readDone(error_t result, uint16_t val){
-		AccelY_data = val;
+		if(result == SUCCESS){ 
+			AccelY_data = val;
+		}
+		else{
+			report_problem();
+		}
 	}
 
 	event void VisibleLight.readDone(error_t result, uint8_t val){
-		VisLight_data = val;
+		if (result == SUCCESS){
+			VisLight_data = val;
+		}
+		else{
+			report_problem();
+		}
 	}
 
 	event void InfraredLight.readDone(error_t result, uint8_t val){
-		InfraLight_data = val;
+		if (result == SUCCESS){	
+			InfraLight_data = val;
+		}
+		else{
+			report_problem();
+		}
+	}
+/////////////////////////////////////////////done events/////////////////////////////////////////
+	event void SerialControl.startDone(error_t error){}
+
+	event void SerialControl.stopDone(error_t error){}
+
+	/////////////////////////Message receiver////////////////////////////////////////////	
+  //
+  // Only the root will receive messages from this interface; its job
+  // is to forward them to the serial uart for processing on the pc
+  // connected to the sensor network.
+  //
+  event message_t* Receive.receive(message_t* msg, void *payload, uint8_t len) {
+
+    motemsg_t* in = (motemsg_t*)payload;
+    motemsg_t* out;
+    
+    if (uartbusy == FALSE) {
+      out = (motemsg_t*)call SerialSend.getPayload(&uartbuf, sizeof(motemsg_t));
+      if (len != sizeof(motemsg_t) || out == NULL) {
+		return msg;
+      }
+      else {
+		memcpy(out, in, sizeof(motemsg_t));
+      }
+      post uartSendTask();
+    }else {
+      // The UART is busy; queue up messages and service them when the
+      // UART becomes free.
+      message_t *newmsg = call UARTMessagePool.get();
+      if (newmsg == NULL) {
+        // drop the message on the floor if we run out of queue space.
+        report_problem();
+        return msg;
+      }
+
+      //Serial port busy, so enqueue.
+      out = (motemsg_t*)call SerialSend.getPayload(newmsg, sizeof(motemsg_t));
+      if (out == NULL) {
+	return msg;
+      }
+      memcpy(out, in, sizeof(motemsg_t));
+
+      if (call UARTQueue.enqueue(newmsg) != SUCCESS) {
+        // drop the message on the floor and hang if we run out of
+        // queue space without running out of queue space first (this
+        // should not occur).
+        call UARTMessagePool.put(newmsg);
+        report_problem();
+        return msg;
+      }
+    }
+
+    return msg;
+  }
+
+  task void uartSendTask() {
+    if (call SerialSend.send(0xffff, &uartbuf, sizeof(motemsg_t)) != SUCCESS) {
+      report_problem();
+    } else {
+      uartbusy = TRUE;
+    }
+  }
+
+	event void RadioControl.stopDone(error_t error){
+	}
+
+	event void Send.sendDone(message_t *msg, error_t error){
+		printf("Send done\n\r");
+		if (error != SUCCESS)
+	      report_problem();
+	    	radioBusy = FALSE;
+	}
+
+
+	event void SerialSend.sendDone(message_t *msg, error_t error){
+		    uartbusy = FALSE;
+    if (call UARTQueue.empty() == FALSE) {
+      // We just finished a UART send, and the uart queue is
+      // non-empty.  Let's start a new one.
+      message_t *queuemsg = call UARTQueue.dequeue();
+      if (queuemsg == NULL) {
+        report_problem();
+        return;
+      }
+      memcpy(&uartbuf, queuemsg, sizeof(message_t));
+      if (call UARTMessagePool.put(queuemsg) != SUCCESS) {
+        report_problem();
+        return;
+      }
+      post uartSendTask();
+    }
 	}
 }
