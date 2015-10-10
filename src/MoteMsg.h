@@ -18,8 +18,6 @@ typedef nx_struct motemsg{
 enum {
   AM_MOTEMSG = 1,
   TIMER_PERIOD_MILLI = 2000,
-  TASK_PERIOD_MILLI = 1000,
-  TIMER_ROUTE_PERIOD_MILLI = 5000
 };
 
 #endif /* WIRELESS_NETWORK_H */
